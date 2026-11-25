@@ -1,4 +1,5 @@
 import math
+import numpy as np
 
 from .base import (
     DEFAULT_QUANTILE_LEVELS,
