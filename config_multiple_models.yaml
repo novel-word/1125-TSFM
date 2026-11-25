@@ -10,8 +10,9 @@ forecast:
   horizon: 24
   update_with_actual: true
   context_limit: 8192
+  # Native deciles: q10, q20, ..., q90.
+  quantiles: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
-# 公共默认参数（会被 models 里的同名键覆盖）
 model:
   device: "cuda"
   batch_size: 1
@@ -37,7 +38,6 @@ models:
   - name: "timestral_5m"
     checkpoint_path: "./weights/mistralai/Timestral-5M"
 
-
   - name: "timestral_28m"
     checkpoint_path: "./weights/mistralai/Timestral-28M"
 
@@ -54,7 +54,7 @@ models:
 #
 #  - name: "tirex2"
 #    checkpoint_path: "./weights/NX-AI/TiRex-2"
-#    enabled: false   # 先标记跳过
+#    enabled: false
 
 output:
   dir: "./outputs"

@@ -1,8 +1,15 @@
 import math
-import numpy as np
-import pandas as pd
 
-from .base import ForecastAdapter, one_dimensional, require_path, resolve_torch_device
+from .base import (
+    DEFAULT_QUANTILE_LEVELS,
+    ForecastAdapter,
+    as_numpy,
+    one_dimensional,
+    require_path,
+    resolve_torch_device,
+    validate_quantile_levels,
+    validate_quantile_matrix,
+)
 
 
 class TimesFM25Adapter(ForecastAdapter):
@@ -19,7 +26,6 @@ class TimesFM25Adapter(ForecastAdapter):
         infer_is_positive: bool = False,
     ):
         import torch
-        import timesfm
         from timesfm import TimesFM_2p5_200M_torch, ForecastConfig
 
         path = require_path(checkpoint_path)
@@ -34,7 +40,6 @@ class TimesFM25Adapter(ForecastAdapter):
             local_files_only=True,
             force_download=False,
         )
-
         device_obj = resolve_torch_device(torch, device)
         self.model.model.to(device_obj)
         self.model.model.device = device_obj
@@ -61,10 +66,26 @@ class TimesFM25Adapter(ForecastAdapter):
             )
         )
 
-    def predict(self, context_values, context_dates, horizon, freq):
+    def predict_quantiles(
+        self, context_values, context_dates, horizon, freq,
+        quantile_levels=DEFAULT_QUANTILE_LEVELS,
+    ):
+        levels, _ = validate_quantile_levels(
+            quantile_levels,
+            supported_levels=DEFAULT_QUANTILE_LEVELS,
+            model_name="TimesFM-2.5",
+        )
         values = one_dimensional(context_values)[-self.context_limit:]
-        point_forecast, _ = self.model.forecast(
+        _, quantile_forecast = self.model.forecast(
             horizon=int(horizon),
             inputs=[values],
         )
-        return np.asarray(point_forecast[0], dtype=np.float32)[:horizon]
+        # TimesFM 2.5 returns [batch, horizon, 10]:
+        # channel 0 is the mean, channels 1..9 are q10..q90.
+        native = as_numpy(quantile_forecast)[0]
+        if native.ndim != 2 or native.shape[1] < 10:
+            raise RuntimeError(
+                f"Unexpected TimesFM-2.5 quantile output shape: {native.shape}"
+            )
+        quantiles = native[:, 1:10]
+        return validate_quantile_matrix(quantiles, horizon, levels, "TimesFM-2.5")

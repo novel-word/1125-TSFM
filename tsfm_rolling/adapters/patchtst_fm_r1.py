@@ -1,7 +1,13 @@
-import numpy as np
-import pandas as pd
-
-from .base import ForecastAdapter, one_dimensional, require_path, resolve_torch_device
+from .base import (
+    DEFAULT_QUANTILE_LEVELS,
+    ForecastAdapter,
+    as_numpy,
+    one_dimensional,
+    require_path,
+    resolve_torch_device,
+    validate_quantile_levels,
+    validate_quantile_matrix,
+)
 
 
 class PatchTSTFMR1Adapter(ForecastAdapter):
@@ -23,21 +29,24 @@ class PatchTSTFMR1Adapter(ForecastAdapter):
             local_files_only=True,
         ).to(self.device).eval()
 
-        model_context = int(self.model.config.context_length)
-        self.model_context = model_context
-        self.context_limit = min(int(context_limit), model_context)
+        self.model_context = int(self.model.config.context_length)
+        self.context_limit = min(int(context_limit), self.model_context)
 
-    def predict(self, context_values, context_dates, horizon, freq):
+    def predict_quantiles(
+        self, context_values, context_dates, horizon, freq,
+        quantile_levels=DEFAULT_QUANTILE_LEVELS,
+    ):
         import torch
 
+        levels, _ = validate_quantile_levels(
+            quantile_levels, model_name="PatchTST-FM-R1"
+        )
         if horizon >= self.model_context:
             raise ValueError(
                 f"PatchTST-FM-R1 requires context + horizon <= "
                 f"{self.model_context}; got horizon={horizon}"
             )
 
-        # In this checkpoint, config.context_length is the full input window,
-        # including the forecast section. Keep room for the requested horizon.
         max_history = min(self.context_limit, self.model_context - int(horizon))
         values = one_dimensional(context_values)[-max_history:]
         past_values = torch.as_tensor(
@@ -48,10 +57,15 @@ class PatchTSTFMR1Adapter(ForecastAdapter):
             output = self.model(
                 past_values=past_values,
                 prediction_length=int(horizon),
-                quantile_levels=[0.5],
+                quantile_levels=list(levels),
                 return_dict=True,
             )
 
-        # Official quantile output: [batch, quantile, horizon, variate].
-        median = output.quantile_outputs[0, 0, :, 0]
-        return median.detach().float().cpu().numpy()[:horizon]
+        # Output shape: [batch, quantile, horizon, variate].
+        native = as_numpy(output.quantile_outputs)
+        if native.ndim != 4 or native.shape[0] != 1 or native.shape[3] != 1:
+            raise RuntimeError(
+                f"Unexpected PatchTST-FM-R1 quantile output shape: {native.shape}"
+            )
+        quantiles = native[0, :, :horizon, 0].T
+        return validate_quantile_matrix(quantiles, horizon, levels, "PatchTST-FM-R1")

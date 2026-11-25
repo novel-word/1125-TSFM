@@ -1,7 +1,12 @@
-import numpy as np
-import pandas as pd
-
-from .base import ForecastAdapter, one_dimensional, require_path
+from .base import (
+    DEFAULT_QUANTILE_LEVELS,
+    ForecastAdapter,
+    as_numpy,
+    one_dimensional,
+    require_path,
+    validate_quantile_levels,
+    validate_quantile_matrix,
+)
 
 
 class TimestralAdapter(ForecastAdapter):
@@ -25,10 +30,22 @@ class TimestralAdapter(ForecastAdapter):
             local_files_only=True,
         )
 
-    def predict(self, context_values, context_dates, horizon, freq):
+    def predict_quantiles(
+        self, context_values, context_dates, horizon, freq,
+        quantile_levels=DEFAULT_QUANTILE_LEVELS,
+    ):
         values = one_dimensional(context_values)[-self.context_limit:]
-        forecast = self.forecaster.forecast(
-            values,
-            prediction_length=int(horizon),
+        forecast = self.forecaster.forecast(values, prediction_length=int(horizon))
+
+        native_levels = tuple(float(q) for q in forecast.quantile_levels)
+        levels, indices = validate_quantile_levels(
+            quantile_levels,
+            supported_levels=native_levels,
+            model_name="Timestral",
         )
-        return forecast.median.detach().float().cpu().numpy().reshape(-1)[:horizon]
+        native = as_numpy(forecast.quantiles)
+        if native.ndim != 4 or native.shape[0] != 1 or native.shape[1] != 1:
+            raise RuntimeError(f"Unexpected Timestral quantile output shape: {native.shape}")
+        # Native shape: [series, variates, horizon, quantile].
+        quantiles = native[0, 0][:, list(indices)]
+        return validate_quantile_matrix(quantiles, horizon, levels, "Timestral")

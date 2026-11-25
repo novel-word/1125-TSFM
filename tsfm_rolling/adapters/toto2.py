@@ -1,6 +1,15 @@
 import numpy as np
 
-from .base import ForecastAdapter, one_dimensional, require_path, resolve_torch_device
+from .base import (
+    DEFAULT_QUANTILE_LEVELS,
+    ForecastAdapter,
+    as_numpy,
+    one_dimensional,
+    require_path,
+    resolve_torch_device,
+    validate_quantile_levels,
+    validate_quantile_matrix,
+)
 
 
 class Toto2Adapter(ForecastAdapter):
@@ -22,73 +31,47 @@ class Toto2Adapter(ForecastAdapter):
         self.model = self.model.to(self.device).eval()
         self.context_limit = int(context_limit)
         if self.context_limit <= 0:
-            raise ValueError(
-                f"context_limit must be positive, got {self.context_limit}"
-            )
+            raise ValueError(f"context_limit must be positive, got {self.context_limit}")
 
-        # Toto2Model exposes the patch size through its loaded config.
         self.patch_size = int(self.model.config.patch_size)
         if self.patch_size <= 0:
-            raise ValueError(
-                f"Invalid TOTO2 patch_size: {self.patch_size}"
-            )
+            raise ValueError(f"Invalid TOTO2 patch_size: {self.patch_size}")
 
-    def predict(self, context_values, context_dates, horizon, freq):
-        import torch
-
-        values = np.asarray(
-            one_dimensional(context_values), dtype=np.float32
-        )[-self.context_limit:]
-
-        if values.size == 0:
-            raise ValueError(
-                "TOTO2 received an empty context window. "
-                "Check context_limit and the rolling-forecast input."
-            )
-
-        # Mark non-finite observations as missing so the model does not
-        # treat NaN/Inf values as real measurements.
+    def predict_quantiles(
+        self, context_values, context_dates, horizon, freq,
+        quantile_levels=DEFAULT_QUANTILE_LEVELS,
+    ):
+        levels, _ = validate_quantile_levels(
+            quantile_levels,
+            supported_levels=DEFAULT_QUANTILE_LEVELS,
+            model_name="Toto-2",
+        )
+        values = one_dimensional(context_values)[-self.context_limit:]
         observed_mask = np.isfinite(values)
         if not observed_mask.any():
-            raise ValueError(
-                "TOTO2 context contains no finite observations."
-            )
+            raise ValueError("Toto-2 context contains no finite observations.")
         values = np.where(observed_mask, values, 0.0)
 
-        # TOTO2's patch-based scaler requires context length to be a
-        # multiple of patch_size. Left-pad so the latest real observation
-        # remains at the end of a complete patch.
+        # Toto-2's patch-based scaler requires context length to be a multiple
+        # of patch_size. Left-pad while keeping the latest observation last.
         pad_len = (-values.size) % self.patch_size
         if pad_len:
-            values = np.pad(
-                values,
-                (pad_len, 0),
-                mode="constant",
-                constant_values=0.0,
-            )
+            values = np.pad(values, (pad_len, 0), mode="constant", constant_values=0.0)
             observed_mask = np.pad(
-                observed_mask,
-                (pad_len, 0),
-                mode="constant",
-                constant_values=False,
+                observed_mask, (pad_len, 0), mode="constant", constant_values=False
             )
 
-        target = torch.as_tensor(
-            values, dtype=torch.float32, device=self.device
-        ).view(1, 1, -1)
+        import torch
+
+        target = torch.as_tensor(values, dtype=torch.float32, device=self.device).view(1, 1, -1)
         target_mask = torch.as_tensor(
             observed_mask, dtype=torch.bool, device=self.device
         ).view(1, 1, -1)
-        series_ids = torch.zeros(
-            (1, 1), dtype=torch.long, device=self.device
-        )
-
-        # TOTO2 requires has_missing_values=True whenever target_mask
-        # contains False entries (including the left-padding positions).
+        series_ids = torch.zeros((1, 1), dtype=torch.long, device=self.device)
         has_missing_values = not bool(observed_mask.all())
 
         with torch.inference_mode():
-            quantiles = self.model.forecast(
+            output = self.model.forecast(
                 {
                     "target": target,
                     "target_mask": target_mask,
@@ -99,7 +82,9 @@ class Toto2Adapter(ForecastAdapter):
                 has_missing_values=has_missing_values,
             )
 
-        # Official output: [quantile, batch, variate, horizon],
-        # quantile levels 0.1 ... 0.9. Index 4 is the median (0.5).
-        median = quantiles[4, 0, 0, :]
-        return median.detach().float().cpu().numpy()[:horizon]
+        # Official shape: [quantile, batch, variate, horizon].
+        native = as_numpy(output)
+        if native.ndim != 4 or native.shape[0] != 9:
+            raise RuntimeError(f"Unexpected Toto-2 output shape: {native.shape}")
+        quantiles = native[:, 0, 0, :].T
+        return validate_quantile_matrix(quantiles, horizon, levels, "Toto-2")

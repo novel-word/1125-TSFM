@@ -1,9 +1,15 @@
 import numpy as np
 import pandas as pd
 
+from tsfm_rolling.adapters.base import (
+    DEFAULT_QUANTILE_LEVELS,
+    quantile_column_name,
+    validate_quantile_levels,
+)
+
 
 def rolling_forecast(model, history_df: pd.DataFrame, test_df: pd.DataFrame, cfg: dict):
-    """Predict H points, then append those H ground-truth observations.
+    """Predict H points with quantiles, then append actual observations.
 
     If the final test remainder is shorter than H, only that remainder is predicted.
     """
@@ -14,6 +20,10 @@ def rolling_forecast(model, history_df: pd.DataFrame, test_df: pd.DataFrame, cfg
     target_col = dcfg["target_col"]
     horizon = int(fcfg["horizon"])
     update_with_actual = bool(fcfg.get("update_with_actual", True))
+    quantile_levels, _ = validate_quantile_levels(
+        fcfg.get("quantiles", DEFAULT_QUANTILE_LEVELS),
+        model_name="rolling_forecast",
+    )
 
     if horizon < 1:
         raise ValueError("forecast.horizon must be >= 1")
@@ -28,35 +38,46 @@ def rolling_forecast(model, history_df: pd.DataFrame, test_df: pd.DataFrame, cfg
         end = min(start + horizon, len(test_values))
         current_h = end - start
 
-        pred = model.predict(
+        point_pred, quantile_pred = model.predict_with_quantiles(
             context_values=history_values,
             context_dates=history_dates,
             horizon=current_h,
             freq=dcfg["freq"],
+            quantile_levels=quantile_levels,
         )
-        pred = np.asarray(pred, dtype=np.float32).reshape(-1)
+        point_pred = np.asarray(point_pred, dtype=np.float32).reshape(-1)
+        quantile_pred = np.asarray(quantile_pred, dtype=np.float32)
+        expected_shape = (current_h, len(quantile_levels))
 
-        if pred.size != current_h:
+        if point_pred.size != current_h:
             raise RuntimeError(
-                f"{cfg['model']['name']} returned {pred.size} values, "
+                f"{cfg['model']['name']} returned {point_pred.size} point values, "
                 f"but this round requires {current_h}"
             )
-        if not np.isfinite(pred).all():
+        if quantile_pred.shape != expected_shape:
+            raise RuntimeError(
+                f"{cfg['model']['name']} returned quantile shape {quantile_pred.shape}, "
+                f"expected {expected_shape}"
+            )
+        if not np.isfinite(point_pred).all() or not np.isfinite(quantile_pred).all():
             raise RuntimeError(f"{cfg['model']['name']} returned NaN/Inf predictions")
 
         actual = test_values[start:end]
         dates = test_dates.iloc[start:end]
 
         for i in range(current_h):
-            rows.append({
+            row = {
                 "round": round_id,
                 "timestamp": dates.iloc[i],
                 "y_true": float(actual[i]),
-                "y_pred": float(pred[i]),
-            })
+                "y_pred": float(point_pred[i]),
+            }
+            for j, level in enumerate(quantile_levels):
+                row[quantile_column_name(level)] = float(quantile_pred[i, j])
+            rows.append(row)
 
-        # User-requested evaluation: append ground truth, not the previous prediction.
-        append_values = actual if update_with_actual else pred
+        # Preserve the existing evaluation protocol: append actuals by default.
+        append_values = actual if update_with_actual else point_pred
         history_values = np.concatenate(
             [history_values, append_values.astype(np.float32)]
         )
@@ -65,4 +86,7 @@ def rolling_forecast(model, history_df: pd.DataFrame, test_df: pd.DataFrame, cfg
             ignore_index=True,
         )
 
-    return pd.DataFrame(rows)
+    columns = ["round", "timestamp", "y_true", "y_pred"] + [
+        quantile_column_name(level) for level in quantile_levels
+    ]
+    return pd.DataFrame(rows, columns=columns)

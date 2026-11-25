@@ -1,7 +1,14 @@
 import numpy as np
 import pandas as pd
 
-from .base import ForecastAdapter, one_dimensional, require_path
+from .base import (
+    DEFAULT_QUANTILE_LEVELS,
+    ForecastAdapter,
+    one_dimensional,
+    require_path,
+    validate_quantile_levels,
+    validate_quantile_matrix,
+)
 
 
 class Chronos2Adapter(ForecastAdapter):
@@ -24,35 +31,37 @@ class Chronos2Adapter(ForecastAdapter):
             int(model_context) if model_context else int(context_limit),
         )
 
-    def predict(self, context_values, context_dates, horizon, freq):
+    def predict_quantiles(
+        self, context_values, context_dates, horizon, freq,
+        quantile_levels=DEFAULT_QUANTILE_LEVELS,
+    ):
         values = one_dimensional(context_values)[-self.context_limit:]
         dates = pd.to_datetime(pd.Series(context_dates)).reset_index(drop=True)
         dates = dates.iloc[-len(values):].reset_index(drop=True)
+        levels, _ = validate_quantile_levels(quantile_levels, model_name="Chronos-2")
 
         df = pd.DataFrame({
             "item_id": "series_0",
             "timestamp": dates,
             "target": values,
         })
-
         forecast_df = self.pipeline.predict_df(
             df,
             id_column="item_id",
             timestamp_column="timestamp",
             target="target",
             prediction_length=int(horizon),
-            quantile_levels=[0.5],
+            quantile_levels=list(levels),
             context_length=self.context_limit,
             freq=freq,
         )
 
-        if "predictions" in forecast_df.columns:
-            pred = forecast_df["predictions"].to_numpy(dtype=np.float32)
-        elif "0.5" in forecast_df.columns:
-            pred = forecast_df["0.5"].to_numpy(dtype=np.float32)
-        else:
+        quantile_columns = [str(q) for q in levels]
+        missing = [column for column in quantile_columns if column not in forecast_df.columns]
+        if missing:
             raise KeyError(
-                "Chronos-2 output has neither 'predictions' nor '0.5' column: "
-                f"{forecast_df.columns.tolist()}"
+                f"Chronos-2 output is missing quantile columns {missing}; "
+                f"available columns: {forecast_df.columns.tolist()}"
             )
-        return pred[:horizon]
+        quantiles = forecast_df[quantile_columns].to_numpy(dtype=np.float32)
+        return validate_quantile_matrix(quantiles, horizon, levels, "Chronos-2")

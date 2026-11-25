@@ -1,7 +1,12 @@
-import numpy as np
-import pandas as pd
-
-from .base import ForecastAdapter, one_dimensional, require_path
+from .base import (
+    DEFAULT_QUANTILE_LEVELS,
+    ForecastAdapter,
+    as_numpy,
+    one_dimensional,
+    require_path,
+    validate_quantile_levels,
+    validate_quantile_matrix,
+)
 
 
 class TimesFM30Adapter(ForecastAdapter):
@@ -22,7 +27,15 @@ class TimesFM30Adapter(ForecastAdapter):
         )
         self.forecaster = TimesFM3Evaluator(config)
 
-    def predict(self, context_values, context_dates, horizon, freq):
+    def predict_quantiles(
+        self, context_values, context_dates, horizon, freq,
+        quantile_levels=DEFAULT_QUANTILE_LEVELS,
+    ):
+        levels, _ = validate_quantile_levels(
+            quantile_levels,
+            supported_levels=DEFAULT_QUANTILE_LEVELS,
+            model_name="TimesFM-3.0",
+        )
         values = one_dimensional(context_values)[-self.context_limit:]
         outputs = list(
             self.forecaster.predict_batch(
@@ -34,4 +47,5 @@ class TimesFM30Adapter(ForecastAdapter):
         )
         if not outputs:
             raise RuntimeError("TimesFM-3.0 returned an empty prediction list")
-        return np.asarray(outputs[0].forecast, dtype=np.float32).reshape(-1)[:horizon]
+        quantiles = as_numpy(outputs[0].quantiles)
+        return validate_quantile_matrix(quantiles, horizon, levels, "TimesFM-3.0")

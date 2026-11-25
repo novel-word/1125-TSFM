@@ -1,20 +1,21 @@
 import json
 import os
 import sys
-from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
-from .base import ForecastAdapter, one_dimensional, require_path
+from .base import (
+    DEFAULT_QUANTILE_LEVELS,
+    ForecastAdapter,
+    one_dimensional,
+    require_path,
+    validate_quantile_levels,
+    validate_quantile_matrix,
+)
 
 
 class HART36MAdapter(ForecastAdapter):
-    """HART official Keras/RWKV-Time implementation.
-
-    Set KERAS_BACKEND before importing keras. The official model directory
-    must contain config.json and model.weights.h5.
-    """
+    """HART official Keras/RWKV-Time implementation with quantile output."""
 
     def __init__(
         self,
@@ -43,8 +44,6 @@ class HART36MAdapter(ForecastAdapter):
             )
 
         sys.path.insert(0, str(repo))
-
-        # Delayed imports are intentional: KERAS_BACKEND must be set first.
         import keras
         import torch
         from model.RWKV_Time.rwkv_time_backbone import RWKVTimeBackbone
@@ -59,27 +58,47 @@ class HART36MAdapter(ForecastAdapter):
         self.torch = torch
         self.patch_size = int(model_config["patch_size"])
         self.n_quantiles = int(model_config["n_quantiles"])
+        native_levels = model_config.get("quantile_levels")
+        if native_levels is None:
+            native_levels = model_config.get("quantiles")
+        if native_levels is None:
+            if self.n_quantiles != 9:
+                raise ValueError(
+                    "HART checkpoint does not declare quantile_levels and "
+                    f"n_quantiles={self.n_quantiles}; cannot safely infer quantile labels"
+                )
+            native_levels = DEFAULT_QUANTILE_LEVELS
+        self.native_quantile_levels = tuple(float(q) for q in native_levels)
+        if len(self.native_quantile_levels) != self.n_quantiles:
+            raise ValueError(
+                "HART config quantile level count does not match n_quantiles: "
+                f"{len(self.native_quantile_levels)} != {self.n_quantiles}"
+            )
         self.context_limit = int(context_limit)
 
         self.backbone = RWKVTimeBackbone(**model_config)
         self.backbone.compile()
-        # This matches the official HART evaluation script.
         self.backbone.load_weights(str(weights_path), True)
-
         self.preprocessor = RWKV_time_CausalLMPreprocessor(
             patch_size=self.patch_size,
             predict_token_num=1,
             sequence_length=2,
         )
 
-    def predict(self, context_values, context_dates, horizon, freq):
+    def predict_quantiles(
+        self, context_values, context_dates, horizon, freq,
+        quantile_levels=DEFAULT_QUANTILE_LEVELS,
+    ):
         values = one_dimensional(context_values)[-self.context_limit:]
+        levels, indices = validate_quantile_levels(
+            quantile_levels,
+            supported_levels=self.native_quantile_levels,
+            model_name="HART",
+        )
         num_tokens = (int(horizon) + self.patch_size - 1) // self.patch_size
 
         self.preprocessor.predict_token_num = num_tokens
-        # Match the official HART evaluator's dynamic context patch count.
         self.preprocessor.sequence_length = len(values) // self.patch_size + 1
-
         model_inputs, mean, std = self.preprocessor.generate_preprocess(
             [values],
             sequence_length=num_tokens,
@@ -92,12 +111,8 @@ class HART36MAdapter(ForecastAdapter):
                 verbose=0,
             )
 
-        pred = np.transpose(
-            model_outputs[:, -num_tokens:],
-            [0, 1, 3, 2],
-        )
+        pred = np.transpose(model_outputs[:, -num_tokens:], [0, 1, 3, 2])
         pred = np.reshape(pred, [len(pred), -1, self.n_quantiles])
         pred = (pred * std + mean)[:, :horizon, :]
-
-        median_index = self.n_quantiles // 2
-        return pred[0, :, median_index].astype(np.float32)
+        quantiles = pred[0][:, list(indices)]
+        return validate_quantile_matrix(quantiles, horizon, levels, "HART")
