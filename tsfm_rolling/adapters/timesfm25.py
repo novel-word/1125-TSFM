@@ -66,17 +66,9 @@ class TimesFM25Adapter(ForecastAdapter):
             )
         )
 
-    def predict_quantiles(
-        self, context_values, context_dates, horizon, freq,
-        quantile_levels=DEFAULT_QUANTILE_LEVELS,
-    ):
-        levels, _ = validate_quantile_levels(
-            quantile_levels,
-            supported_levels=DEFAULT_QUANTILE_LEVELS,
-            model_name="TimesFM-2.5",
-        )
+    def _forecast(self, context_values, horizon):
         values = one_dimensional(context_values)[-self.context_limit:]
-        _, quantile_forecast = self.model.forecast(
+        point_forecast, quantile_forecast = self.model.forecast(
             horizon=int(horizon),
             inputs=[values],
         )
@@ -87,5 +79,32 @@ class TimesFM25Adapter(ForecastAdapter):
             raise RuntimeError(
                 f"Unexpected TimesFM-2.5 quantile output shape: {native.shape}"
             )
-        quantiles = native[:, 1:10]
+        point = as_numpy(point_forecast)[0].reshape(-1)[:horizon]
+        return point, native[:, 1:10]
+
+    def predict_quantiles(
+        self, context_values, context_dates, horizon, freq,
+        quantile_levels=DEFAULT_QUANTILE_LEVELS,
+    ):
+        levels, _ = validate_quantile_levels(
+            quantile_levels,
+            supported_levels=DEFAULT_QUANTILE_LEVELS,
+            model_name="TimesFM-2.5",
+        )
+        _, quantiles = self._forecast(context_values, horizon)
         return validate_quantile_matrix(quantiles, horizon, levels, "TimesFM-2.5")
+
+    def predict_with_quantiles(
+        self, context_values, context_dates, horizon, freq,
+        quantile_levels=DEFAULT_QUANTILE_LEVELS,
+    ):
+        levels, _ = validate_quantile_levels(
+            quantile_levels,
+            supported_levels=DEFAULT_QUANTILE_LEVELS,
+            model_name="TimesFM-2.5",
+        )
+        point, quantiles = self._forecast(context_values, horizon)
+        quantiles = validate_quantile_matrix(quantiles, horizon, levels, "TimesFM-2.5")
+        if point.size != int(horizon) or not np.isfinite(point).all():
+            raise RuntimeError("TimesFM-2.5 returned an invalid point forecast")
+        return point, quantiles
