@@ -1,0 +1,60 @@
+data:
+  csv_path: "./data/U99.csv"
+  timestamp_col: "Time"
+  target_col: "Value"
+  test_start: "2019-10-01"
+  test_end: "2019-10-31"
+  freq: "15min"
+
+forecast:
+  horizon: 24
+  update_with_actual: true
+  context_limit: 8192
+
+# 公共默认参数（会被 models 里的同名键覆盖）
+model:
+  device: "cuda"
+  batch_size: 1
+
+models:
+  - name: "timesfm_2_5"
+    checkpoint_path: "./weights/google/google--timesfm-2.5-200m-pytorch"
+    timesfm_normalize_inputs: true
+    timesfm_infer_is_positive: false
+
+  - name: "timesfm_3_0"
+    checkpoint_path: "./weights/google/timesfm-30-pytorch"
+
+  - name: "toto_2_0_22m"
+    checkpoint_path: "./weights/Datadog/Toto-2.0-22m"
+
+  - name: "toto_2_0_313m"
+    checkpoint_path: "./weights/Datadog/Toto-2.0-313m"
+
+  - name: "chronos2"
+    checkpoint_path: "./weights/Chronos-2"
+
+  - name: "timestral_5m"
+    checkpoint_path: "./weights/mistralai/Timestral-5M"
+
+
+  - name: "timestral_28m"
+    checkpoint_path: "./weights/mistralai/Timestral-28M"
+
+  - name: "timestral_123m"
+    checkpoint_path: "./weights/mistralai/Timestral-123M"
+
+  - name: "timestral_209m"
+    checkpoint_path: "./weights/mistralai/Timestral-209M"
+
+  - name: "tirex"
+    checkpoint_path: "./weights/NX-AI/TiRex"
+    tirex_backend: "torch"
+    tirex_compile: false
+#
+#  - name: "tirex2"
+#    checkpoint_path: "./weights/NX-AI/TiRex-2"
+#    enabled: false   # 先标记跳过
+
+output:
+  dir: "./outputs"
